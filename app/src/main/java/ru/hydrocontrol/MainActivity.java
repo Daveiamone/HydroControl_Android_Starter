@@ -32,8 +32,11 @@ public class MainActivity extends Activity {
     private EditText ppmInput;
     private Spinner stageSpinner;
     private TextView adviceText;
-    private TextView historyText;
+    private LinearLayout historyContainer;
+    private Spinner metricSpinner;
     private ChartView chartView;
+
+    private final String[] metrics = {"pH", "PPM", "EC (мСм/см)"};
 
     private final String[] stages = {
         "После пересадки / укоренение",
@@ -128,7 +131,32 @@ public class MainActivity extends Activity {
         adviceText.setBackgroundColor(0xFFE6EEE6);
         root.addView(adviceText);
 
-        addSection(root, "График pH");
+        addSection(root, "График показателей");
+
+        metricSpinner = new Spinner(this);
+        ArrayAdapter<String> metricAdapter = new ArrayAdapter<>(
+            this, android.R.layout.simple_spinner_item, metrics
+        );
+        metricAdapter.setDropDownViewResource(
+            android.R.layout.simple_spinner_dropdown_item
+        );
+        metricSpinner.setAdapter(metricAdapter);
+        metricSpinner.setOnItemSelectedListener(
+            new android.widget.AdapterView.OnItemSelectedListener() {
+                @Override
+                public void onItemSelected(
+                    android.widget.AdapterView<?> parent,
+                    View view, int position, long id
+                ) {
+                    if (chartView != null) chartView.setMetric(position);
+                }
+                @Override
+                public void onNothingSelected(
+                    android.widget.AdapterView<?> parent
+                ) { }
+            }
+        );
+        root.addView(metricSpinner);
 
         chartView = new ChartView(this);
         root.addView(
@@ -141,11 +169,14 @@ public class MainActivity extends Activity {
 
         addSection(root, "История измерений");
 
-        historyText = createText(
-            "Пока нет сохранённых измерений.",
-            14, 0xFF26372A, false
-        );
-        root.addView(historyText);
+        Button clearHistoryButton = new Button(this);
+        clearHistoryButton.setText("Удалить всю историю");
+        clearHistoryButton.setOnClickListener(v -> confirmClearHistory());
+        root.addView(clearHistoryButton);
+
+        historyContainer = new LinearLayout(this);
+        historyContainer.setOrientation(LinearLayout.VERTICAL);
+        root.addView(historyContainer);
 
         root.addView(createText(
             "PPM зависит от шкалы конкретного прибора. "
@@ -374,22 +405,15 @@ public class MainActivity extends Activity {
 
     private void refreshHistory() {
         ArrayList<Sample> samples = new ArrayList<>();
-
         Cursor cursor = db.getReadableDatabase().rawQuery(
-            "SELECT measured_at, stage, ph, ec, ppm "
-                + "FROM measurements "
-                + "ORDER BY measured_at DESC LIMIT 10",
-            null
+            "SELECT id, measured_at, stage, ph, ec, ppm FROM measurements "
+                + "ORDER BY measured_at DESC LIMIT 10", null
         );
-
         try {
             while (cursor.moveToNext()) {
                 samples.add(new Sample(
-                    cursor.getLong(0),
-                    cursor.getString(1),
-                    cursor.getDouble(2),
-                    cursor.getDouble(3),
-                    cursor.getInt(4)
+                    cursor.getLong(0), cursor.getLong(1), cursor.getString(2),
+                    cursor.getDouble(3), cursor.getDouble(4), cursor.getInt(5)
                 ));
             }
         } finally {
@@ -397,37 +421,103 @@ public class MainActivity extends Activity {
         }
 
         Collections.reverse(samples);
+        historyContainer.removeAllViews();
 
         if (samples.isEmpty()) {
-            historyText.setText(
-                "Пока нет сохранённых измерений."
-            );
+            historyContainer.addView(createText(
+                "Пока нет сохранённых измерений.", 14, 0xFF26372A, false
+            ));
         } else {
-            StringBuilder history = new StringBuilder();
             SimpleDateFormat dateFormat =
-                new SimpleDateFormat(
-                    "dd.MM.yyyy HH:mm", Locale.getDefault()
-                );
+                new SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.getDefault());
 
-            for (Sample sample : samples) {
-                history.append(
-                    dateFormat.format(new Date(sample.time))
-                );
-                history.append("\n");
-                history.append(sample.stage);
-                history.append("\n");
-                history.append(String.format(
-                    Locale.getDefault(),
-                    "pH: %.2f | EC: %.2f | PPM: %d",
-                    sample.ph, sample.ec, sample.ppm
+            for (int i = samples.size() - 1; i >= 0; i--) {
+                Sample sample = samples.get(i);
+                LinearLayout card = new LinearLayout(this);
+                card.setOrientation(LinearLayout.VERTICAL);
+                card.setPadding(dp(12), dp(12), dp(12), dp(8));
+                card.setBackgroundColor(0xFFFFFFFF);
+
+                LinearLayout.LayoutParams cardParams =
+                    new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    );
+                cardParams.bottomMargin = dp(8);
+                historyContainer.addView(card, cardParams);
+
+                card.addView(createText(
+                    dateFormat.format(new Date(sample.time)),
+                    15, 0xFF245B35, true
                 ));
-                history.append("\n\n");
-            }
+                card.addView(createText(
+                    sample.stage, 13, 0xFF647066, false
+                ));
+                card.addView(createText(
+                    String.format(Locale.getDefault(),
+                        "pH: %.2f   |   EC: %.2f   |   PPM: %d",
+                        sample.ph, sample.ec, sample.ppm),
+                    14, 0xFF26372A, false
+                ));
 
-            historyText.setText(history.toString());
+                Button deleteButton = new Button(this);
+                deleteButton.setText("Удалить эту запись");
+                deleteButton.setOnClickListener(v -> confirmDeleteSample(sample));
+                card.addView(deleteButton);
+            }
+        }
+        chartView.setSamples(samples);
+    }
+
+    private void confirmDeleteSample(Sample sample) {
+        new android.app.AlertDialog.Builder(this)
+            .setTitle("Удалить измерение?")
+            .setMessage("Эта запись будет удалена без возможности восстановления.")
+            .setNegativeButton("Отмена", null)
+            .setPositiveButton("Удалить", (dialog, which) -> {
+                int deleted = db.getWritableDatabase().delete(
+                    "measurements", "id = ?",
+                    new String[]{String.valueOf(sample.id)}
+                );
+                refreshHistory();
+                Toast.makeText(this,
+                    deleted > 0 ? "Запись удалена." : "Запись не найдена.",
+                    Toast.LENGTH_SHORT).show();
+            })
+            .show();
+    }
+
+    private void confirmClearHistory() {
+        Cursor cursor = db.getReadableDatabase().rawQuery(
+            "SELECT COUNT(*) FROM measurements", null
+        );
+        int count = 0;
+        try {
+            if (cursor.moveToFirst()) count = cursor.getInt(0);
+        } finally {
+            cursor.close();
         }
 
-        chartView.setSamples(samples);
+        if (count == 0) {
+            Toast.makeText(this, "История уже пуста.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        new android.app.AlertDialog.Builder(this)
+            .setTitle("Удалить всю историю?")
+            .setMessage("Будут удалены все " + count
+                + " измерений. Восстановить их будет нельзя.")
+            .setNegativeButton("Отмена", null)
+            .setPositiveButton("Удалить всё", (dialog, which) -> {
+                db.getWritableDatabase().delete("measurements", null, null);
+                refreshHistory();
+                adviceText.setText(
+                    "История очищена. Введи показатели раствора и сохрани измерение."
+                );
+                Toast.makeText(this, "История измерений удалена.",
+                    Toast.LENGTH_SHORT).show();
+            })
+            .show();
     }
 
     @Override
@@ -439,16 +529,15 @@ public class MainActivity extends Activity {
     }
 
     private static class Sample {
+        final long id;
         final long time;
         final String stage;
         final double ph;
         final double ec;
         final int ppm;
 
-        Sample(
-            long time, String stage,
-            double ph, double ec, int ppm
-        ) {
+        Sample(long id, long time, String stage, double ph, double ec, int ppm) {
+            this.id = id;
             this.time = time;
             this.stage = stage;
             this.ph = ph;
@@ -488,11 +577,9 @@ public class MainActivity extends Activity {
     }
 
     private class ChartView extends View {
-
-        private final Paint paint =
-            new Paint(Paint.ANTI_ALIAS_FLAG);
-
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private List<Sample> samples = new ArrayList<>();
+        private int metric = 0;
 
         ChartView(Context context) {
             super(context);
@@ -504,118 +591,107 @@ public class MainActivity extends Activity {
             invalidate();
         }
 
+        void setMetric(int value) {
+            metric = value;
+            invalidate();
+        }
+
         @Override
         protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
-            canvas.drawColor(Color.WHITE);
-
-            float d = getResources()
-                .getDisplayMetrics().density;
-
-            float left = 42 * d;
-            float right = getWidth() - 12 * d;
-            float top = 34 * d;
-            float bottom = getHeight() - 28 * d;
+            canvas.drawColor(0xFFFFFFFF);
+            float d = getResources().getDisplayMetrics().density;
+            float left = 48 * d, right = getWidth() - 14 * d;
+            float top = 42 * d, bottom = getHeight() - 30 * d;
 
             paint.setStyle(Paint.Style.FILL);
-            paint.setColor(0xFF26372A);
-            paint.setTextSize(13 * d);
-            canvas.drawText(
-                "Последние измерения pH", left, 18 * d, paint
-            );
+            paint.setColor(0xFF245B35);
+            paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+            paint.setTextSize(14 * d);
+            canvas.drawText("Динамика " + metrics[metric], left, 23 * d, paint);
+            paint.setTypeface(Typeface.DEFAULT);
 
             if (samples.isEmpty()) {
+                paint.setColor(0xFF647066);
                 paint.setTextSize(12 * d);
-                canvas.drawText(
-                    "График появится после первого измерения.",
-                    left, top + 25 * d, paint
-                );
+                canvas.drawText("График появится после первого измерения.",
+                    left, top + 25 * d, paint);
                 return;
             }
 
-            float yTargetHigh = chartY(6.2, top, bottom);
-            float yTargetLow = chartY(5.5, top, bottom);
+            double min = 0, max;
+            if (metric == 0) {
+                min = 4.5; max = 7.0;
+            } else if (metric == 1) {
+                max = 1000;
+                for (Sample sample : samples) max = Math.max(max, sample.ppm);
+                max = Math.ceil(max / 250.0) * 250.0;
+            } else {
+                max = 2.0;
+                for (Sample sample : samples) max = Math.max(max, sample.ec);
+                max = Math.ceil(max * 2.0) / 2.0;
+            }
 
-            paint.setColor(0xFFE8F2E8);
-            canvas.drawRect(
-                left, yTargetHigh, right, yTargetLow, paint
-            );
+            if (metric == 0) {
+                float high = chartY(6.2, min, max, top, bottom);
+                float low = chartY(5.5, min, max, top, bottom);
+                paint.setColor(0xFFE8F2E8);
+                canvas.drawRect(left, high, right, low, paint);
+            }
 
-            paint.setColor(0xFFDCE3DC);
-            paint.setStrokeWidth(d);
+            paint.setColor(0xFFE0E7E0);
+            paint.setStrokeWidth(1 * d);
             paint.setStyle(Paint.Style.STROKE);
-
-            for (double level = 4.5; level <= 7.01; level += 0.5) {
-                float y = chartY(level, top, bottom);
+            for (int i = 0; i <= 5; i++) {
+                double level = min + (max - min) * i / 5.0;
+                float y = chartY(level, min, max, top, bottom);
                 canvas.drawLine(left, y, right, y, paint);
-
                 paint.setStyle(Paint.Style.FILL);
                 paint.setTextSize(10 * d);
                 paint.setColor(0xFF647066);
-                canvas.drawText(
-                    String.format(Locale.US, "%.1f", level),
-                    3 * d, y + 4 * d, paint
-                );
-
-                paint.setColor(0xFFDCE3DC);
+                String label = metric == 1
+                    ? String.format(Locale.US, "%.0f", level)
+                    : String.format(Locale.US, "%.1f", level);
+                canvas.drawText(label, 3 * d, y + 4 * d, paint);
+                paint.setColor(0xFFE0E7E0);
                 paint.setStyle(Paint.Style.STROKE);
             }
 
             paint.setStyle(Paint.Style.STROKE);
             paint.setStrokeWidth(2.5f * d);
-            paint.setColor(0xFF39834B);
+            paint.setColor(metric == 0 ? 0xFF39834B
+                : (metric == 1 ? 0xFF2478B8 : 0xFFCE8133));
 
-            float previousX = 0;
-            float previousY = 0;
+            float previousX = 0, previousY = 0;
             boolean hasPrevious = false;
-
             for (int i = 0; i < samples.size(); i++) {
                 Sample sample = samples.get(i);
-
                 float x = left + (right - left)
-                    * (i / (float) Math.max(
-                        1, samples.size() - 1
-                    ));
-
-                float y = chartY(sample.ph, top, bottom);
-
-                if (hasPrevious) {
-                    canvas.drawLine(
-                        previousX, previousY, x, y, paint
-                    );
-                }
-
+                    * (i / (float)Math.max(1, samples.size() - 1));
+                double value = metric == 0 ? sample.ph
+                    : (metric == 1 ? sample.ppm : sample.ec);
+                float y = chartY(value, min, max, top, bottom);
+                if (hasPrevious) canvas.drawLine(previousX, previousY, x, y, paint);
                 paint.setStyle(Paint.Style.FILL);
                 canvas.drawCircle(x, y, 4 * d, paint);
                 paint.setStyle(Paint.Style.STROKE);
-
-                previousX = x;
-                previousY = y;
-                hasPrevious = true;
+                previousX = x; previousY = y; hasPrevious = true;
             }
 
             paint.setStyle(Paint.Style.FILL);
             paint.setTextSize(10 * d);
             paint.setColor(0xFF647066);
-            canvas.drawText("Старые", left, getHeight() - 5 * d, paint);
-
+            canvas.drawText("Старые", left, getHeight() - 7 * d, paint);
             paint.setTextAlign(Paint.Align.RIGHT);
-            canvas.drawText(
-                "Новые", right, getHeight() - 5 * d, paint
-            );
+            canvas.drawText("Новые", right, getHeight() - 7 * d, paint);
             paint.setTextAlign(Paint.Align.LEFT);
         }
 
-        private float chartY(
-            double value, float top, float bottom
-        ) {
-            double bounded = Math.max(
-                4.5, Math.min(7.0, value)
-            );
-
-            return bottom - (float)(
-                (bounded - 4.5) / (7.0 - 4.5)
-            ) * (bottom - top);
+        private float chartY(double value, double min, double max,
+                             float top, float bottom) {
+            double bounded = Math.max(min, Math.min(max, value));
+            return bottom - (float)((bounded - min) / (max - min))
+                * (bottom - top);
         }
     }
 }
